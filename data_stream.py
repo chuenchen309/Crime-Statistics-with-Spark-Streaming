@@ -8,22 +8,21 @@ KAFKA_SERVER_URL = 'localhost:9092'
 TOPIC_NAME = 'crime-topic'
 
 # TODO Create a schema for incoming resources
-schema = StructType([
-    StructField('crime_id', StringType(), True),
-    StructField('original_crime_type_name', StringType(), True),
-    StructField('report_date', StringType(), True),
-    StructField('call_date', StringType(), True),
-    StructField('offense_date', StringType(), True),
-    StructField('call_time', StringType(), True),
-    StructField('call_date_time', TimestampType(), True),
-    StructField('disposition', StringType(), True),
-    StructField('address', StringType(), True),
-    StructField('city', StringType(), True),
-    StructField('state', StringType(), True),
-    StructField('agency_id', StringType(), True),
-    StructField('address_type', StringType(), True),
-    StructField('common_location', StringType(), True),
-])
+schema = StructType([StructField('crime_id', StringType(), True),
+                     StructField('original_crime_type_name', StringType(), True),
+                     StructField('report_date', StringType(), True),
+                     StructField('call_date', StringType(), True),
+                     StructField('offense_date', StringType(), True),
+                     StructField('call_time', StringType(), True),
+                     StructField('call_date_time', StringType(), True),
+                     StructField('disposition', StringType(), True),
+                     StructField('address', StringType(), True),
+                     StructField('city', StringType(), True),
+                     StructField('state', StringType(), True),
+                     StructField('agency_id', StringType(), True),
+                     StructField('address_type', StringType(), True),
+                     StructField('common_location', StringType(), True)
+                     ])
 
 def run_spark_job(spark):
 
@@ -36,9 +35,8 @@ def run_spark_job(spark):
         .option('kafka.bootstrap.servers', KAFKA_SERVER_URL) \
         .option('subscribe', TOPIC_NAME) \
         .option('startingOffsets', 'earliest') \
-        .option('maxOffsetsPerTrigger', 10) \
-        .option('maxRatePerPartition', 10) \
-        .option('stopGracefullyOnShutdown', "true") \
+        .option('maxRatePerPartition', 100) \
+        .option('maxOffsetsPerTrigger', 100) \
         .load()
 
     # Show schema for the incoming resources for checks
@@ -53,18 +51,20 @@ def run_spark_job(spark):
         .select("DF.*")
 
     # TODO select original_crime_type_name and disposition
-    distinct_table = service_table \
-        .select('original_crime_type_name', 'disposition', 'call_date_time') \
-        .distinct() \
-        .withWatermark('call_date_time', "1 minute")
+    distinct_table = service_table\
+        .select(psf.col('crime_id'),
+                psf.col('original_crime_type_name'),
+                psf.to_timestamp(psf.col('call_date_time')).alias('call_datetime'),
+                psf.col('address'),
+                psf.col('disposition'))
 
     # count the number of original crime type
     agg_df = distinct_table \
-        .dropna() \
-        .select('original_crime_type_name') \
-        .groupby('original_crime_type_name') \
-        .agg({'original_crime_type_name': 'count'}) \
-        .orderBy('count(original_crime_type_name)', ascending=True)
+        .withWatermark("call_datetime", "60 minutes") \
+        .groupBy(
+        psf.window(distinct_table.call_datetime, "10 minutes", "5 minutes"),
+        distinct_table.original_crime_type_name).count()
+
 
     # TODO Q1. Submit a screen shot of a batch ingestion of the aggregation
     # TODO write output stream
@@ -90,7 +90,11 @@ def run_spark_job(spark):
 
     # TODO join on disposition column
     join_query = agg_df \
-        .join(radio_code_df, col('agg_df.disposition') == col('radio_code_df.disposition'), 'left_outer')
+        .join(radio_code_df, "disposition") \
+        .writeStream \
+        .format("console") \
+        .queryName("join") \
+        .start()
 
     join_query.awaitTermination()
 
@@ -103,7 +107,6 @@ if __name__ == "__main__":
         .builder \
         .master("local[*]") \
         .appName("KafkaSparkStructuredStreaming") \
-        .config("spark.ui.port", 3000) \
         .getOrCreate()
 
     logger.info("Spark started")
